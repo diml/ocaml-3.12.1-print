@@ -169,6 +169,7 @@ OCAMLCMOFILES=$(OCAMLSRCDIR)/parsing/printast.cmo \
 	$(OCAMLSRCDIR)/typing/typeclass.cmo \
 	$(OCAMLSRCDIR)/typing/mtype.cmo \
 	$(OCAMLSRCDIR)/typing/includemod.cmo \
+	$(OCAMLSRCDIR)/typing/gen_printer.cmo \
 	$(OCAMLSRCDIR)/typing/typemod.cmo \
 	$(OCAMLSRCDIR)/bytecomp/lambda.cmo \
 	$(OCAMLSRCDIR)/bytecomp/typeopt.cmo \

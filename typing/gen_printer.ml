@@ -12,8 +12,36 @@ open Typedtree
 open Types
 open Predef
 
+type ('a, 'b) either =
+  | Inl of 'a
+  | Inr of 'b
+
+module PathMap : sig
+  type 'a t
+  val empty : 'a t
+  val add : Path.t -> 'a -> 'a t -> 'a t
+  val find : Path.t -> 'a t -> ('a, int) either
+end = struct
+  type 'a t = (Path.t * 'a) list
+  let empty = []
+  let add p x l = (p, x) :: l
+  let find p l =
+    let rec aux n l =
+      match l with
+        | [] -> Inr n
+        | (p', x) :: l -> if Path.same p p' then Inl x else aux (n + 1) l
+    in
+    aux 0 l
+end
+
+module IntSet = Set.Make(struct type t = int let compare a b = a - b end)
+
 module MakeGen(Loc : sig val loc : Location.t end) = struct
   open Loc
+
+  let exp_letrec l e =
+    { pexp_desc = Pexp_let (Recursive, l, e);
+      pexp_loc = loc }
 
   let exp_string str =
     { pexp_desc = Pexp_constant (Const_string str);
@@ -63,16 +91,16 @@ module MakeGen(Loc : sig val loc : Location.t end) = struct
   let exp_enclose sep b e l =
     exp_append (exp_string b) (exp_append (exp_concat sep l) (exp_string e))
 
-  let exp_field e id =
-    { pexp_desc = Pexp_field (e, longident_of_list id);
+  let exp_field e li =
+    { pexp_desc = Pexp_field (e, li);
       pexp_loc = loc }
 
   let pat_any =
     { ppat_desc = Ppat_any;
       ppat_loc = loc }
 
-  let pat_construct id args =
-    { ppat_desc = Ppat_construct (longident_of_list id, args, false);
+  let pat_construct li args =
+    { ppat_desc = Ppat_construct (li, args, false);
       ppat_loc = loc }
 
   let pat_var name =
@@ -94,84 +122,192 @@ module MakeGen(Loc : sig val loc : Location.t end) = struct
     in
     map 0 l
 
-  let rec gen env typ =
+  let rec longident_of_path = function
+    | Path.Pident id -> Longident.Lident (Ident.name id)
+    | Path.Pdot (a, b, _) -> Longident.Ldot (longident_of_path a, b)
+    | Path.Papply (a, b) -> Longident.Lapply (longident_of_path a, longident_of_path b)
+
+  let rec replace_last li repl =
+    match li with
+      | Longident.Lident _ -> Longident.Lident repl
+      | Longident.Ldot (li, _) -> Longident.Ldot (li, repl)
+      | Longident.Lapply (li1, li2) -> Longident.Lapply (li1, replace_last li2 repl)
+
+  let rec gen env printer_names printer_exprs params typ =
     match typ.desc with
       | Tvar ->
-          exp_fun pat_any (exp_string "<poly>")
+          (printer_names,
+           printer_exprs,
+           if IntSet.mem typ.id params then
+             exp_var ("$p" ^ string_of_int typ.id)
+           else
+             exp_fun pat_any (exp_string "<poly>"))
       | Tarrow _ ->
-          exp_fun pat_any (exp_string "<fun>")
+          (printer_names,
+           printer_exprs,
+           exp_fun pat_any (exp_string "<fun>"))
       | Ttuple l ->
           let vars = gen_vars l in
-          exp_fun
-            (pat_tuple (List.map pat_var vars))
-            (exp_enclose
-               ", " "(" ")"
-               (List.map2 (fun var typ -> exp_apply (gen env typ) [exp_var var]) vars l))
-      | Tconstr (path, _, _) ->
-          if path = path_int then
-            exp_fun (pat_var "$") (exp_apply (exp_ident ["Pervasives"; "string_of_int"]) [exp_var "$"])
-          else if path = path_string then
-            exp_fun
-              (pat_var "$")
-              (exp_append
-                 (exp_string "\"")
-                 (exp_append
-                    (exp_apply (exp_ident ["String"; "escaped"]) [exp_var "$"])
-                    (exp_string "\"")))
-          else begin
-            match try Some (Env.find_type path env) with Not_found -> None with
-              | None ->
-                  exp_fun pat_any (exp_string "<abstract>")
-              | Some { type_kind = Type_variant l } ->
-                  exp_function
-                    (List.map
-                       (function
-                          | (name, []) ->
-                              (pat_construct [name] None,
-                               exp_string name)
-                          | (name, args) ->
-                              let vars = gen_vars args in
-                              (pat_construct [name] (Some (pat_tuple (List.map pat_var vars))),
-                               exp_append
-                                 (exp_string (name ^ " "))
-                                 (exp_enclose
-                                    ", " "(" ")"
-                                    (List.map2 (fun var typ -> exp_apply (gen env typ) [exp_var var]) vars args))))
-                       l)
-              | Some { type_kind = Type_record (l, _) } ->
-                  exp_fun
-                    (pat_var "$")
-                    (exp_enclose
-                       "; " "{ " " }"
-                       (List.map
-                          (fun (name, _, typ) ->
-                             exp_append
-                               (exp_string (name ^ " = "))
-                               (exp_apply (gen env typ) [exp_field (exp_var "$") [name]]))
-                          l))
-              | Some { type_kind = Type_abstract; type_manifest = None } ->
-                  exp_fun pat_any (exp_string "<abstract>")
-              | Some { type_kind = Type_abstract; type_manifest = Some typ } ->
-                  gen env typ
-          end
+          let printer_names, printer_exprs, printers = gen_printers env printer_names printer_exprs params l in
+          (printer_names,
+           printer_exprs,
+           exp_fun
+             (pat_tuple (List.map pat_var vars))
+             (exp_enclose
+                ", " "(" ")"
+                (List.map2 (fun var printer -> exp_apply printer [exp_var var]) vars printers)))
+      | Tconstr (path, args, _) -> begin
+          match PathMap.find path printer_names with
+            | Inl name ->
+                let printer_names, printer_exprs, printers = gen_printers env printer_names printer_exprs params args in
+                (printer_names,
+                 printer_exprs,
+                 exp_fun (pat_var "$") (exp_apply (exp_var name) (printers @ [exp_var "$"])))
+            | Inr n ->
+                let name = "$print" ^ string_of_int n in
+                let printer_names = PathMap.add path name printer_names in
+                let printer_names, printer_exprs, printer = gen_constr_printer env printer_names printer_exprs path in
+                let printer_exprs = (name, printer) :: printer_exprs in
+                let printer_names, printer_exprs, printers = gen_printers env printer_names printer_exprs params args in
+                (printer_names,
+                 printer_exprs,
+                 exp_fun (pat_var "$") (exp_apply (exp_var name) (printers @ [exp_var "$"])))
+        end
       | Tobject _ ->
-          exp_fun pat_any (exp_string "<object>")
+          (printer_names,
+           printer_exprs,
+           exp_fun pat_any (exp_string "<object>"))
       | Tfield _ ->
-          exp_fun pat_any (exp_string "<field>")
+          (printer_names,
+           printer_exprs,
+           exp_fun pat_any (exp_string "<field>"))
       | Tnil ->
-          exp_fun pat_any (exp_string "<nil>")
+          (printer_names,
+           printer_exprs,
+           exp_fun pat_any (exp_string "<nil>"))
       | Tlink typ ->
-          gen env typ
+          gen env printer_names printer_exprs params typ
       | Tsubst typ ->
-          gen env typ
+          gen env printer_names printer_exprs params typ
       | Tvariant _ ->
-          exp_fun pat_any (exp_string "<variant>")
+          (printer_names,
+           printer_exprs,
+           exp_fun pat_any (exp_string "<variant>"))
       | Tunivar ->
-          exp_fun pat_any (exp_string "<poly>")
+          (printer_names,
+           printer_exprs,
+           exp_fun pat_any (exp_string "<poly>"))
       | Tpoly _ ->
-          exp_fun pat_any (exp_string "<poly>")
+          (printer_names,
+           printer_exprs,
+           exp_fun pat_any (exp_string "<poly>"))
       | Tpackage _ ->
-          exp_fun pat_any (exp_string "<module>")
+          (printer_names,
+           printer_exprs,
+           exp_fun pat_any (exp_string "<module>"))
+
+  and gen_printers env printer_names printer_exprs params typs =
+    match typs with
+      | [] ->
+          (printer_names, printer_exprs, [])
+      | typ :: typs ->
+          let printer_names, printer_exprs, p = gen env printer_names printer_exprs params typ in
+          let printer_names, printer_exprs, l = gen_printers env printer_names printer_exprs params typs in
+          (printer_names, printer_exprs, p :: l)
+
+  and gen_constr_printer env printer_names printer_exprs path =
+    if path = path_int then
+      (printer_names,
+       printer_exprs,
+       exp_ident ["Pervasives"; "string_of_int"])
+    else if path = path_string then
+      (printer_names,
+       printer_exprs,
+       exp_fun
+         (pat_var "$")
+         (exp_append
+            (exp_string "\"")
+            (exp_append
+               (exp_apply (exp_ident ["String"; "escaped"]) [exp_var "$"])
+               (exp_string "\""))))
+    else begin
+      let li = longident_of_path path in
+      match try Some (Env.find_type path env) with Not_found -> None with
+        | None ->
+            (printer_names,
+             printer_exprs,
+             exp_fun pat_any (exp_string "<abstract>"))
+        | Some decl ->
+            let mkfun e =
+              let rec aux = function
+                | [] ->
+                    e
+                | { id } :: params ->
+                    exp_fun (pat_var ("$p" ^ string_of_int id)) (aux params)
+              in
+              aux decl.type_params
+            in
+            let params = List.fold_left (fun set typ -> IntSet.add typ.id set) IntSet.empty decl.type_params in
+            match decl with
+              | { type_kind = Type_variant l } ->
+                  let rec aux printer_names printer_exprs l =
+                    match l with
+                      | [] ->
+                          (printer_names, printer_exprs, [])
+                      | (name, []) :: l ->
+                          let printer_names, printer_exprs, l = aux printer_names printer_exprs l in
+                          (printer_names,
+                           printer_exprs,
+                           (pat_construct (replace_last li name) None,
+                            exp_string name) :: l)
+                      | (name, args) :: l ->
+                          let printer_names, printer_exprs, l = aux printer_names printer_exprs l in
+                          let vars = gen_vars args in
+                          let printer_names, printer_exprs, printers = gen_printers env printer_names printer_exprs params args in
+                          (printer_names,
+                           printer_exprs,
+                           (pat_construct (replace_last li name) (Some (pat_tuple (List.map pat_var vars))),
+                            exp_append
+                              (exp_string (name ^ " "))
+                              (exp_enclose
+                                 ", " "(" ")"
+                                 (List.map2 (fun var printer -> exp_apply printer [exp_var var]) vars printers))) :: l)
+                  in
+                  let printer_names, printer_exprs, l = aux printer_names printer_exprs l in
+                  (printer_names,
+                   printer_exprs,
+                   mkfun (exp_function l))
+              | { type_kind = Type_record (l, _) } ->
+                  let rec aux printer_names printer_exprs l =
+                    match l with
+                      | [] ->
+                          (printer_names, printer_exprs, [])
+                      | (name, _, typ) :: l ->
+                          let printer_names, printer_exprs, printer = gen env printer_names printer_exprs params typ in
+                          let printer_names, printer_exprs, l = aux printer_names printer_exprs l in
+                          (printer_names,
+                           printer_exprs,
+                           exp_append
+                             (exp_string (name ^ " = "))
+                             (exp_apply printer [exp_field (exp_var "$") (replace_last li name)]) :: l)
+                  in
+                  let printer_names, printer_exprs, l = aux printer_names printer_exprs l in
+                  (printer_names,
+                   printer_exprs,
+                   mkfun
+                     (exp_fun
+                        (pat_var "$")
+                        (exp_enclose "; " "{ " " }" l)))
+              | { type_kind = Type_abstract; type_manifest = None } ->
+                  (printer_names,
+                   printer_exprs,
+                   mkfun (exp_fun pat_any (exp_string "<abstract>")))
+              | { type_kind = Type_abstract; type_manifest = Some typ } ->
+                  let printer_names, printer_exprs, printer = gen env printer_names printer_exprs params typ in
+                  (printer_names,
+                   printer_exprs,
+                   mkfun printer)
+    end
 end
 
 let rec expanse_structure l =
@@ -196,14 +332,15 @@ and expanse_structure_item = function
 and expanse_expression e =
   match e.exp_desc with
     | Texp_ident (_, { val_kind = Val_prim { prim_name = "%show" } }) -> begin
-        let module Gen = MakeGen(struct let loc = e.exp_loc end) in
         match e.exp_type.desc with
           | Tarrow (_, typ, _, _) ->
-(*              Printtyp.type_expr Format.std_formatter typ;
-              Format.pp_print_newline Format.std_formatter ();
-              Printast.implementation Format.std_formatter [{ pstr_desc = Pstr_eval (Gen.gen e.exp_env typ); pstr_loc = e.exp_loc }];
-              Format.pp_print_newline Format.std_formatter ();*)
-              Typecore.type_expression e.exp_env (Gen.gen e.exp_env typ)
+              let module Gen = MakeGen(struct let loc = e.exp_loc end) in
+              let printer_names, printer_exprs, printer = Gen.gen e.exp_env PathMap.empty [] IntSet.empty typ in
+              Typecore.type_expression
+                e.exp_env
+                (Gen.exp_letrec
+                   (List.map (fun (name, expr) -> (Gen.pat_var name, expr)) printer_exprs)
+                   printer)
           | _ ->
               failwith "invalid type for %show"
       end
