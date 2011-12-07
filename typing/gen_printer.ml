@@ -129,6 +129,10 @@ module MakeGen(Loc : sig val loc : Location.t end) = struct
     { ppat_desc = Ppat_construct (li, args, false);
       ppat_loc = loc }
 
+  let pat_variant lbl arg =
+    { ppat_desc = Ppat_variant (lbl, arg);
+      ppat_loc = loc }
+
   let pat_var name =
     { ppat_desc = Ppat_var name;
       ppat_loc = loc }
@@ -256,10 +260,35 @@ module MakeGen(Loc : sig val loc : Location.t end) = struct
           gen env printer_names printer_exprs params typ
       | Tsubst typ ->
           gen env printer_names printer_exprs params typ
-      | Tvariant _ ->
+      | Tvariant { row_fields = l } ->
+          let rec aux printer_names printer_exprs l =
+            match l with
+              | [] ->
+                  (printer_names, printer_exprs, [])
+              | (name, field) :: l ->
+                  let printer_names, printer_exprs, l = aux printer_names printer_exprs l in
+                  match field with
+                    | Rpresent None ->
+                        (printer_names,
+                         printer_exprs,
+                         (pat_variant name None,
+                          exp_string ("`" ^ name)) :: l)
+                    | Rpresent (Some typ) ->
+                        let printer_names, printer_exprs, printer = gen env printer_names printer_exprs params typ in
+                        (printer_names,
+                         printer_exprs,
+                         (pat_variant name (Some (pat_var "$")),
+                          exp_concat ""
+                            [exp_string ("`" ^ name ^ " (");
+                             exp_apply printer [exp_var "$"];
+                             exp_string ")"]) :: l)
+                    | _ ->
+                        (printer_names, printer_exprs, l)
+          in
+          let printer_names, printer_exprs, l = aux printer_names printer_exprs l in
           (printer_names,
            printer_exprs,
-           exp_fun pat_any (exp_string "<variant>"))
+           exp_function l)
       | Tunivar ->
           (printer_names,
            printer_exprs,
