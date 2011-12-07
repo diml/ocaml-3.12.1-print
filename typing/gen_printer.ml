@@ -84,9 +84,15 @@ module MakeGen(Loc : sig val loc : Location.t end) = struct
       [a; b]
 
   let rec exp_concat sep = function
-    | [] -> exp_string ""
-    | [x] -> x
-    | x :: l -> exp_append x (exp_append (exp_string sep) (exp_concat sep l))
+    | [] ->
+        exp_string ""
+    | [x] ->
+        x
+    | x :: l ->
+        if sep = "" then
+          exp_append x (exp_concat "" l)
+        else
+          exp_append x (exp_append (exp_string sep) (exp_concat sep l))
 
   let exp_enclose sep b e l =
     exp_append (exp_string b) (exp_append (exp_concat sep l) (exp_string e))
@@ -225,12 +231,35 @@ module MakeGen(Loc : sig val loc : Location.t end) = struct
        printer_exprs,
        exp_fun
          (pat_var "$")
-         (exp_append
-            (exp_string "\"")
-            (exp_append
-               (exp_apply (exp_ident ["String"; "escaped"]) [exp_var "$"])
-               (exp_string "\""))))
-    else begin
+         (exp_concat ""
+            [exp_string "\"";
+             exp_apply (exp_ident ["String"; "escaped"]) [exp_var "$"];
+             exp_string "\""]))
+    else if path = path_list then begin
+      (printer_names,
+       printer_exprs,
+       exp_fun
+         (pat_var "$p0")
+         (exp_function
+            [(pat_construct (Longident.Lident "[]") None,
+              exp_string "[]");
+             (pat_construct (Longident.Lident "::") (Some (pat_tuple [pat_var "$0"; pat_var "$1"])),
+              exp_concat ""
+                [exp_string "[";
+                 exp_apply (exp_var "$p0") [exp_var "$0"];
+                 exp_letrec
+                   [(pat_var "$aux",
+                     exp_function
+                       [(pat_construct (Longident.Lident "[]") None,
+                         exp_string "");
+                        (pat_construct (Longident.Lident "::") (Some (pat_tuple [pat_var "$0"; pat_var "$1"])),
+                         exp_concat ""
+                           [exp_string "; ";
+                            exp_apply (exp_var "$p0") [exp_var "$0"];
+                            exp_apply (exp_var "$aux") [exp_var "$1"]])])]
+                   (exp_apply (exp_var "$aux") [exp_var "$1"]);
+                 exp_string "]"])]))
+    end else begin
       let li = longident_of_path path in
       match try Some (Env.find_type path env) with Not_found -> None with
         | None ->
