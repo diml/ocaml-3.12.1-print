@@ -898,7 +898,8 @@ and type_structure funct_body anchor env sstr scope =
   in
   if !Clflags.annotations
   then List.iter (function {pstr_loc = l} -> Stypes.record_phrase l) sstr;
-  type_struct env sstr
+  let st, sg, env = type_struct env sstr in
+  (Gen_printer.expanse st, sg, env)
 
 let type_module = type_module true false None
 let type_structure = type_structure false None

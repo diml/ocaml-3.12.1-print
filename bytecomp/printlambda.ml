@@ -182,6 +182,7 @@ let primitive ppf = function
       print_bigarray "get" unsafe kind ppf layout
   | Pbigarrayset(unsafe, n, kind, layout) ->
       print_bigarray "set" unsafe kind ppf layout
+  | Pshow -> fprintf ppf "show"
 
 let rec lam ppf = function
   | Lvar id ->
