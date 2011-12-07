@@ -560,7 +560,17 @@ and expanse_expression e =
               let printer_names, printer_exprs, printer = Gen.gen e.exp_env PathMap.empty [] IntSet.empty typ in
               let result =
                 Gen.exp_letrec
-                  (List.map (fun (name, typ, expr) -> (Gen.pat_constraint (Gen.pat_var name) typ, expr)) printer_exprs)
+                  (List.map
+                     (fun (name, typ, expr) ->
+                        let expr =
+                          match expr.pexp_desc with
+                            | Pexp_function _ ->
+                                expr
+                            | _ ->
+                                Gen.exp_fun (Gen.pat_var "$") (Gen.exp_apply expr [Gen.exp_var "$"])
+                        in
+                        (Gen.pat_constraint (Gen.pat_var name) typ, expr))
+                     printer_exprs)
                   printer
               in
               (*Printast.implementation Format.std_formatter [{ pstr_desc = Pstr_eval result; pstr_loc = e.exp_loc }];*)
