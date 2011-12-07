@@ -898,8 +898,7 @@ and type_structure funct_body anchor env sstr scope =
   in
   if !Clflags.annotations
   then List.iter (function {pstr_loc = l} -> Stypes.record_phrase l) sstr;
-  let st, sg, env = type_struct env sstr in
-  (Gen_printer.expanse st, sg, env)
+  type_struct env sstr
 
 let type_module = type_module true false None
 let type_structure = type_structure false None
@@ -1118,3 +1117,13 @@ let report_error ppf = function
   | With_need_typeconstr ->
       fprintf ppf
         "Only type constructors with identical parameters can be substituted."
+
+(* Printer expansion *)
+
+let type_structure env sstr scope =
+  let st, sg, env = type_structure env sstr scope in
+  (Gen_printer.expanse st, sg, env)
+
+let type_implementation sourcefile outputprefix modulename initial_env ast =
+  let st, mc = type_implementation sourcefile outputprefix modulename initial_env ast in
+  (Gen_printer.expanse st, mc)
