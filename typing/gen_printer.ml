@@ -47,6 +47,10 @@ module MakeGen(Loc : sig val loc : Location.t end) = struct
     { pexp_desc = Pexp_let (Recursive, l, e);
       pexp_loc = loc }
 
+  let exp_constraint e t =
+    { pexp_desc = Pexp_constraint (e, None, Some t);
+      pexp_loc = loc }
+
   let exp_string str =
     { pexp_desc = Pexp_constant (Const_string str);
       pexp_loc = loc }
@@ -479,11 +483,24 @@ module MakeGen(Loc : sig val loc : Location.t end) = struct
                   (printer_names,
                    printer_exprs,
                    mkfun (exp_fun pat_any (exp_string "<abstract>")))
-              | { type_kind = Type_abstract; type_manifest = Some typ } ->
+              | { type_kind = Type_abstract; type_manifest = Some typ; type_private = Public } ->
                   let printer_names, printer_exprs, printer = gen env printer_names printer_exprs params typ in
                   (printer_names,
                    printer_exprs,
                    mkfun printer)
+              | { type_kind = Type_abstract; type_manifest = Some typ; type_private = Private } ->
+                  let printer_names, printer_exprs, printer = gen env printer_names printer_exprs params typ in
+                  (printer_names,
+                   printer_exprs,
+                   mkfun
+                     (exp_fun
+                        (pat_var "$")
+                        (exp_apply
+                           printer
+                           [exp_apply
+                              (* We need to do a coercion here. *)
+                              (exp_ident ["Obj"; "magic"])
+                              [exp_var "$"]])))
 end
 
 let rec expanse_structure l =
