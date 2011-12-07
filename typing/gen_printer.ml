@@ -136,6 +136,26 @@ module MakeGen(Loc : sig val loc : Location.t end) = struct
         { ppat_desc = Ppat_tuple l;
           ppat_loc = loc }
 
+  let pat_constraint p t =
+    { ppat_desc = Ppat_constraint (p, t);
+      ppat_loc = loc }
+
+  let typ_var v =
+    { ptyp_desc = Ptyp_var v;
+      ptyp_loc = loc }
+
+  let typ_arrow a b =
+    { ptyp_desc = Ptyp_arrow ("", a, b);
+      ptyp_loc = loc }
+
+  let typ_constr id args =
+    { ptyp_desc = Ptyp_constr (id, args);
+      ptyp_loc = loc }
+
+  let typ_poly vars t =
+    { ptyp_desc = Ptyp_poly (vars, t);
+      ptyp_loc = loc }
+
   let gen_vars l =
     let rec map i l =
       match l with
@@ -185,16 +205,32 @@ module MakeGen(Loc : sig val loc : Location.t end) = struct
                 (List.map2 (fun var printer -> exp_apply printer [exp_var var]) vars printers)))
       | Tconstr (path, args, _) -> begin
           match PathMap.find path printer_names with
-            | Inl name ->
-                let printer_names, printer_exprs, printers = gen_printers env printer_names printer_exprs params args in
-                (printer_names,
-                 printer_exprs,
-                 exp_fun (pat_var "$") (exp_apply (exp_var name) (printers @ [exp_var "$"])))
+            | Inl name -> begin
+                match args with
+                  | [] ->
+                      (printer_names,
+                       printer_exprs,
+                       exp_var name)
+                  | _ ->
+                      let printer_names, printer_exprs, printers = gen_printers env printer_names printer_exprs params args in
+                      (printer_names,
+                       printer_exprs,
+                       exp_fun (pat_var "$") (exp_apply (exp_var name) (printers @ [exp_var "$"])))
+              end
             | Inr n ->
-                let name = "$print" ^ string_of_int n in
+                let name = "$print" ^ string_of_int n ^ "=" ^ Path.name path in
                 let printer_names = PathMap.add path name printer_names in
                 let printer_names, printer_exprs, printer = gen_constr_printer env printer_names printer_exprs path in
-                let printer_exprs = (name, printer) :: printer_exprs in
+                let vars = gen_vars args in
+                let typ =
+                  typ_poly
+                    vars
+                    (List.fold_right
+                       (fun var typ -> typ_arrow (typ_arrow (typ_var var) (typ_constr (Longident.Lident "string") [])) typ)
+                       vars
+                       (typ_arrow (typ_constr (longident_of_path path) (List.map typ_var vars)) (typ_constr (Longident.Lident "string") [])))
+                in
+                let printer_exprs = (name, typ, printer) :: printer_exprs in
                 let printer_names, printer_exprs, printers = gen_printers env printer_names printer_exprs params args in
                 (printer_names,
                  printer_exprs,
@@ -476,11 +512,13 @@ and expanse_expression e =
           | Tarrow (_, typ, _, _) ->
               let module Gen = MakeGen(struct let loc = e.exp_loc end) in
               let printer_names, printer_exprs, printer = Gen.gen e.exp_env PathMap.empty [] IntSet.empty typ in
-              Typecore.type_expression
-                e.exp_env
-                (Gen.exp_letrec
-                   (List.map (fun (name, expr) -> (Gen.pat_var name, expr)) printer_exprs)
-                   printer)
+              let result =
+                Gen.exp_letrec
+                  (List.map (fun (name, typ, expr) -> (Gen.pat_constraint (Gen.pat_var name) typ, expr)) printer_exprs)
+                  printer
+              in
+              (*Printast.implementation Format.std_formatter [{ pstr_desc = Pstr_eval result; pstr_loc = e.exp_loc }];*)
+              Typecore.type_expression e.exp_env result
           | _ ->
               failwith "invalid type for %show"
       end
