@@ -39,12 +39,20 @@ module IntSet = Set.Make(struct type t = int let compare a b = a - b end)
 module MakeGen(Loc : sig val loc : Location.t end) = struct
   open Loc
 
+  let exp_ifthenelse e et ee =
+    { pexp_desc = Pexp_ifthenelse (e, et, Some ee);
+      pexp_loc = loc }
+
   let exp_letrec l e =
     { pexp_desc = Pexp_let (Recursive, l, e);
       pexp_loc = loc }
 
   let exp_string str =
     { pexp_desc = Pexp_constant (Const_string str);
+      pexp_loc = loc }
+
+  let exp_int int =
+    { pexp_desc = Pexp_constant (Const_int int);
       pexp_loc = loc }
 
   let exp_fun pat exp =
@@ -100,6 +108,10 @@ module MakeGen(Loc : sig val loc : Location.t end) = struct
   let exp_field e li =
     { pexp_desc = Pexp_field (e, li);
       pexp_loc = loc }
+
+  let pat_array l =
+    { ppat_desc = Ppat_array l;
+      ppat_loc = loc }
 
   let pat_any =
     { ppat_desc = Ppat_any;
@@ -259,6 +271,34 @@ module MakeGen(Loc : sig val loc : Location.t end) = struct
                             exp_apply (exp_var "$aux") [exp_var "$1"]])])]
                    (exp_apply (exp_var "$aux") [exp_var "$1"]);
                  exp_string "]"])]))
+    end else if path = path_array then begin
+      (printer_names,
+       printer_exprs,
+       exp_fun
+         (pat_var "$p0")
+         (exp_function
+            [(pat_array [],
+              exp_string "[||]");
+             (pat_var "$",
+              exp_concat ""
+                [exp_string "[|";
+                 exp_apply (exp_var "$p0") [exp_apply (exp_ident ["Array"; "get"]) [exp_var "$"; exp_int 0]];
+                 exp_letrec
+                   [(pat_var "$aux",
+                     exp_fun
+                       (pat_var "$i")
+                       (exp_ifthenelse
+                          (exp_apply
+                             (exp_ident ["Pervasives"; "="])
+                             [exp_var "$i";
+                              exp_apply (exp_ident ["Array"; "length"]) [exp_var "$"]])
+                          (exp_string "")
+                          (exp_concat ""
+                             [exp_string "; ";
+                              exp_apply (exp_var "$p0") [exp_apply (exp_ident ["Array"; "get"]) [exp_var "$"; exp_var "$i"]];
+                              exp_apply (exp_var "$aux") [exp_apply (exp_ident ["Pervasives"; "succ"]) [exp_var "$i"]]])))]
+                   (exp_apply (exp_var "$aux") [exp_int 1]);
+                 exp_string "|]"])]))
     end else begin
       let li = longident_of_path path in
       match try Some (Env.find_type path env) with Not_found -> None with
