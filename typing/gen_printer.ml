@@ -113,6 +113,10 @@ module MakeGen(Loc : sig val loc : Location.t end) = struct
     { ppat_desc = Ppat_array l;
       ppat_loc = loc }
 
+  let pat_lazy p =
+    { ppat_desc = Ppat_lazy p;
+      ppat_loc = loc }
+
   let pat_any =
     { ppat_desc = Ppat_any;
       ppat_loc = loc }
@@ -234,11 +238,20 @@ module MakeGen(Loc : sig val loc : Location.t end) = struct
           (printer_names, printer_exprs, p :: l)
 
   and gen_constr_printer env printer_names printer_exprs path =
-    if path = path_int then
+    if Path.same path path_int then
       (printer_names,
        printer_exprs,
        exp_ident ["Pervasives"; "string_of_int"])
-    else if path = path_string then
+    else if Path.same path path_char then
+      (printer_names,
+       printer_exprs,
+       exp_fun
+         (pat_var "$")
+         (exp_concat ""
+            [exp_string "\"";
+             exp_apply (exp_ident ["Char"; "escaped"]) [exp_var "$"];
+             exp_string "\""]))
+    else if Path.same path path_string then
       (printer_names,
        printer_exprs,
        exp_fun
@@ -247,7 +260,55 @@ module MakeGen(Loc : sig val loc : Location.t end) = struct
             [exp_string "\"";
              exp_apply (exp_ident ["String"; "escaped"]) [exp_var "$"];
              exp_string "\""]))
-    else if path = path_list then begin
+    else if Path.same path path_float then
+      (printer_names,
+       printer_exprs,
+       exp_ident ["Pervasives"; "string_of_float"])
+    else if Path.same path path_bool then
+      (printer_names,
+       printer_exprs,
+       exp_ident ["Pervasives"; "string_of_bool"])
+    else if Path.same path path_unit then
+      (printer_names,
+       printer_exprs,
+       exp_fun pat_any (exp_string "()"))
+    else if Path.same path path_exn then
+      (printer_names,
+       printer_exprs,
+       exp_ident ["Printexc"; "to_string"])
+    else if Path.same path path_nativeint then
+      (printer_names,
+       printer_exprs,
+       exp_fun
+         (pat_var "$")
+         (exp_concat ""
+            [exp_apply (exp_ident ["Nativeint"; "to_string"]) [exp_var "$"];
+             exp_string "n"]))
+    else if Path.same path path_int32 then
+      (printer_names,
+       printer_exprs,
+       exp_fun
+         (pat_var "$")
+         (exp_concat ""
+            [exp_apply (exp_ident ["Int32"; "to_string"]) [exp_var "$"];
+             exp_string "l"]))
+    else if Path.same path path_int64 then
+      (printer_names,
+       printer_exprs,
+       exp_fun
+         (pat_var "$")
+         (exp_concat ""
+            [exp_apply (exp_ident ["Int64"; "to_string"]) [exp_var "$"];
+             exp_string "L"]))
+    else if Path.same path path_lazy_t then
+      (printer_names,
+       printer_exprs,
+       exp_fun
+         (pat_var "$p0")
+         (exp_fun
+            (pat_lazy (pat_var "$"))
+            (exp_apply (exp_var "$p0") [exp_var "$"])))
+    else if path = path_list then
       (printer_names,
        printer_exprs,
        exp_fun
@@ -271,7 +332,7 @@ module MakeGen(Loc : sig val loc : Location.t end) = struct
                             exp_apply (exp_var "$aux") [exp_var "$1"]])])]
                    (exp_apply (exp_var "$aux") [exp_var "$1"]);
                  exp_string "]"])]))
-    end else if path = path_array then begin
+    else if path = path_array then
       (printer_names,
        printer_exprs,
        exp_fun
@@ -299,7 +360,7 @@ module MakeGen(Loc : sig val loc : Location.t end) = struct
                               exp_apply (exp_var "$aux") [exp_apply (exp_ident ["Pervasives"; "succ"]) [exp_var "$i"]]])))]
                    (exp_apply (exp_var "$aux") [exp_int 1]);
                  exp_string "|]"])]))
-    end else begin
+    else
       let li = longident_of_path path in
       match try Some (Env.find_type path env) with Not_found -> None with
         | None ->
@@ -376,7 +437,6 @@ module MakeGen(Loc : sig val loc : Location.t end) = struct
                   (printer_names,
                    printer_exprs,
                    mkfun printer)
-    end
 end
 
 let rec expanse_structure l =
