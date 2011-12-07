@@ -149,6 +149,11 @@ module MakeGen(Loc : sig val loc : Location.t end) = struct
     | Path.Pdot (a, b, _) -> Longident.Ldot (longident_of_path a, b)
     | Path.Papply (a, b) -> Longident.Lapply (longident_of_path a, longident_of_path b)
 
+  let rec path_last = function
+    | Path.Pident id -> Ident.name id
+    | Path.Pdot (_, n, _) -> n
+    | Path.Papply (a, b) -> path_last b
+
   let rec replace_last li repl =
     match li with
       | Longident.Lident _ -> Longident.Lident repl
@@ -238,7 +243,13 @@ module MakeGen(Loc : sig val loc : Location.t end) = struct
           (printer_names, printer_exprs, p :: l)
 
   and gen_constr_printer env printer_names printer_exprs path =
-    if Path.same path path_int then
+    let li = replace_last (longident_of_path path) ("string_of_" ^ path_last path) in
+    if try let _ = Env.lookup_value li env in true with Not_found -> false then
+      (printer_names,
+       printer_exprs,
+       { pexp_desc = Pexp_ident li;
+         pexp_loc = loc })
+    else if Path.same path path_int then
       (printer_names,
        printer_exprs,
        exp_ident ["Pervasives"; "string_of_int"])
