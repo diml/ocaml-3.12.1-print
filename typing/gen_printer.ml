@@ -48,6 +48,20 @@ end
 module MakeHelpers(Loc : Loc) = struct
   open Loc
 
+  let exp_unit =
+    { pexp_desc = Pexp_construct (Longident.Lident "()", None, false);
+      pexp_loc = loc }
+
+  let rec exp_seq l =
+    match l with
+      | [] ->
+          failwith "Gen_printer.MakeHelpers.exp_seq"
+      | [x] ->
+          x
+      | x :: l ->
+          { pexp_desc = Pexp_sequence (x, exp_seq l);
+            pexp_loc = loc }
+
   let exp_ifthenelse e et ee =
     { pexp_desc = Pexp_ifthenelse (e, et, Some ee);
       pexp_loc = loc }
@@ -451,15 +465,8 @@ module MakeGenerator(Loc : Loc)(Combinators : Combinators) = struct
                   let printer_names, printer_exprs, printer = gen env printer_names printer_exprs params typ in
                   (printer_names,
                    printer_exprs,
-                   mkfun
-                     (exp_fun
-                        (pat_var "$")
-                        (exp_apply
-                           printer
-                           [exp_apply
-                              (* We need to do a coercion here. *)
-                              (exp_ident ["Obj"; "magic"])
-                              [exp_var "$"]])))
+                   (* We need to do a coercion here. *)
+                   mkfun (exp_apply (exp_ident ["Obj"; "magic"]) [printer]))
 
   let rec generate env typ =
     let printer_names, printer_exprs, printer = gen env PathMap.empty [] IntSet.empty (Combinators.get_param typ) in

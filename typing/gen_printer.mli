@@ -73,6 +73,7 @@ module MakeHelpers(Loc : Loc) : sig
 
   val gen_vars : 'a list -> string list
 
+  val exp_unit : expression
   val exp_ifthenelse : expression -> expression -> expression -> expression
   val exp_letrec : (pattern * expression) list -> expression -> expression
   val exp_let : pattern -> expression -> expression -> expression
@@ -85,6 +86,7 @@ module MakeHelpers(Loc : Loc) : sig
   val exp_ident : string list -> expression
   val exp_var : string -> expression
   val exp_field : expression -> Longident.t -> expression
+  val exp_seq : expression list -> expression
 
   val pat_array : pattern list -> pattern
   val pat_lazy : pattern -> pattern
