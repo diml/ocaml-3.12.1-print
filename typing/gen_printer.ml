@@ -12,31 +12,40 @@ open Typedtree
 open Types
 open Predef
 
-type ('a, 'b) either =
-  | Inl of 'a
-  | Inr of 'b
-
-module PathMap : sig
-  type 'a t
-  val empty : 'a t
-  val add : Path.t -> 'a -> 'a t -> 'a t
-  val find : Path.t -> 'a t -> ('a, int) either
-end = struct
-  type 'a t = (Path.t * 'a) list
-  let empty = []
-  let add p x l = (p, x) :: l
-  let find p l =
-    let rec aux n l =
-      match l with
-        | [] -> Inr n
-        | (p', x) :: l -> if Path.same p p' then Inl x else aux (n + 1) l
-    in
-    aux 0 l
+module type Loc = sig
+  val loc : Location.t
 end
 
-module IntSet = Set.Make(struct type t = int let compare a b = a - b end)
+module type Combinators = sig
+  open Parsetree
+  val typ : core_type -> core_type
+  val get_param : Types.type_expr -> Types.type_expr
+  val prefix : string
+  val int : expression
+  val char : expression
+  val string : expression
+  val float : expression
+  val bool : expression
+  val unit : expression
+  val exn : expression
+  val array : expression
+  val list : expression
+  val nativeint : expression
+  val int32 : expression
+  val int64 : expression
+  val lazy_t : expression
+  val var : expression
+  val abstract : expression
+  val arrow : expression
+  val tuple : expression list -> expression
+  val obj : expression
+  val poly_variant : (string * expression option) list -> expression
+  val package : expression
+  val variant : (Longident.t * string * expression list) list -> expression
+  val record : (Longident.t * string * expression) list -> expression
+end
 
-module MakeGen(Loc : sig val loc : Location.t end) = struct
+module MakeHelpers(Loc : Loc) = struct
   open Loc
 
   let exp_ifthenelse e et ee =
@@ -45,6 +54,10 @@ module MakeGen(Loc : sig val loc : Location.t end) = struct
 
   let exp_letrec l e =
     { pexp_desc = Pexp_let (Recursive, l, e);
+      pexp_loc = loc }
+
+  let exp_let p e e' =
+    { pexp_desc = Pexp_let (Nonrecursive, [(p, e)], e');
       pexp_loc = loc }
 
   let exp_constraint e t =
@@ -79,7 +92,7 @@ module MakeGen(Loc : sig val loc : Location.t end) = struct
           pexp_loc = loc }
 
   let longident_of_list = function
-    | [] -> assert false
+    | [] -> failwith "Gen_printer.MakeHelpers.longident_of_list"
     | x :: l -> List.fold_left (fun acc x -> Longident.Ldot (acc, x)) (Longident.Lident x) l
 
   let exp_ident id =
@@ -89,25 +102,6 @@ module MakeGen(Loc : sig val loc : Location.t end) = struct
   let exp_var name =
     { pexp_desc = Pexp_ident (Longident.Lident name);
       pexp_loc = loc }
-
-  let exp_append a b =
-    exp_apply
-      (exp_ident ["Pervasives"; "^"])
-      [a; b]
-
-  let rec exp_concat sep = function
-    | [] ->
-        exp_string ""
-    | [x] ->
-        x
-    | x :: l ->
-        if sep = "" then
-          exp_append x (exp_concat "" l)
-        else
-          exp_append x (exp_append (exp_string sep) (exp_concat sep l))
-
-  let exp_enclose sep b e l =
-    exp_append (exp_string b) (exp_append (exp_concat sep l) (exp_string e))
 
   let exp_field e li =
     { pexp_desc = Pexp_field (e, li);
@@ -161,8 +155,12 @@ module MakeGen(Loc : sig val loc : Location.t end) = struct
       ptyp_loc = loc }
 
   let typ_poly vars t =
-    { ptyp_desc = Ptyp_poly (vars, t);
-      ptyp_loc = loc }
+    match vars with
+      | [] ->
+          t
+      | _ ->
+          { ptyp_desc = Ptyp_poly (vars, t);
+            ptyp_loc = loc }
 
   let gen_vars l =
     let rec map i l =
@@ -176,17 +174,46 @@ module MakeGen(Loc : sig val loc : Location.t end) = struct
     | Path.Pident id -> Longident.Lident (Ident.name id)
     | Path.Pdot (a, b, _) -> Longident.Ldot (longident_of_path a, b)
     | Path.Papply (a, b) -> Longident.Lapply (longident_of_path a, longident_of_path b)
+end
+
+type ('a, 'b) either =
+  | Inl of 'a
+  | Inr of 'b
+
+module PathMap : sig
+  type 'a t
+  val empty : 'a t
+  val add : Path.t -> 'a -> 'a t -> 'a t
+  val find : Path.t -> 'a t -> ('a, int) either
+end = struct
+  type 'a t = (Path.t * 'a) list
+  let empty = []
+  let add p x l = (p, x) :: l
+  let find p l =
+    let rec aux n l =
+      match l with
+        | [] -> Inr n
+        | (p', x) :: l -> if Path.same p p' then Inl x else aux (n + 1) l
+    in
+    aux 0 l
+end
+
+module IntSet = Set.Make(struct type t = int let compare a b = a - b end)
+
+module MakeGenerator(Loc : Loc)(Combinators : Combinators) = struct
+  module Helpers = MakeHelpers(Loc)
+  open Helpers
+
+  let rec replace_last li name =
+    match li with
+      | Longident.Lident _ -> Longident.Lident name
+      | Longident.Ldot (li, _) -> Longident.Ldot (li, name)
+      | Longident.Lapply (li1, li2) -> Longident.Lapply (li1, replace_last li2 name)
 
   let rec path_last = function
     | Path.Pident id -> Ident.name id
-    | Path.Pdot (_, n, _) -> n
-    | Path.Papply (a, b) -> path_last b
-
-  let rec replace_last li repl =
-    match li with
-      | Longident.Lident _ -> Longident.Lident repl
-      | Longident.Ldot (li, _) -> Longident.Ldot (li, repl)
-      | Longident.Lapply (li1, li2) -> Longident.Lapply (li1, replace_last li2 repl)
+    | Path.Pdot (_, id, _) -> id
+    | Path.Papply (p1, p2) -> path_last p2
 
   let rec gen env printer_names printer_exprs params typ =
     match typ.desc with
@@ -194,23 +221,18 @@ module MakeGen(Loc : sig val loc : Location.t end) = struct
           (printer_names,
            printer_exprs,
            if IntSet.mem typ.id params then
-             exp_var ("$p" ^ string_of_int typ.id)
+             exp_var ("$gen" ^ string_of_int typ.id)
            else
-             exp_fun pat_any (exp_string "<poly>"))
+             Combinators.var)
       | Tarrow _ ->
           (printer_names,
            printer_exprs,
-           exp_fun pat_any (exp_string "<fun>"))
+           Combinators.arrow)
       | Ttuple l ->
-          let vars = gen_vars l in
           let printer_names, printer_exprs, printers = gen_printers env printer_names printer_exprs params l in
           (printer_names,
            printer_exprs,
-           exp_fun
-             (pat_tuple (List.map pat_var vars))
-             (exp_enclose
-                ", " "(" ")"
-                (List.map2 (fun var printer -> exp_apply printer [exp_var var]) vars printers)))
+           Combinators.tuple printers)
       | Tconstr (path, args, _) -> begin
           match PathMap.find path printer_names with
             | Inl name -> begin
@@ -226,7 +248,7 @@ module MakeGen(Loc : sig val loc : Location.t end) = struct
                        exp_fun (pat_var "$") (exp_apply (exp_var name) (printers @ [exp_var "$"])))
               end
             | Inr n ->
-                let name = "$print" ^ string_of_int n ^ "=" ^ Path.name path in
+                let name = "$gen_aux" ^ string_of_int n ^ "=" ^ Path.name path in
                 let printer_names = PathMap.add path name printer_names in
                 let printer_names, printer_exprs, printer = gen_constr_printer env printer_names printer_exprs path in
                 let vars = gen_vars args in
@@ -234,28 +256,30 @@ module MakeGen(Loc : sig val loc : Location.t end) = struct
                   typ_poly
                     vars
                     (List.fold_right
-                       (fun var typ -> typ_arrow (typ_arrow (typ_var var) (typ_constr (Longident.Lident "string") [])) typ)
+                       (fun var typ -> typ_arrow (Combinators.typ (typ_var var)) typ)
                        vars
-                       (typ_arrow (typ_constr (longident_of_path path) (List.map typ_var vars)) (typ_constr (Longident.Lident "string") [])))
+                       (Combinators.typ (typ_constr (longident_of_path path) (List.map typ_var vars))))
                 in
                 let printer_exprs = (name, typ, printer) :: printer_exprs in
                 let printer_names, printer_exprs, printers = gen_printers env printer_names printer_exprs params args in
-                (printer_names,
-                 printer_exprs,
-                 exp_fun (pat_var "$") (exp_apply (exp_var name) (printers @ [exp_var "$"])))
+                match args with
+                  | [] ->
+                      (printer_names,
+                       printer_exprs,
+                       exp_var name)
+                  | _ ->
+                      (printer_names,
+                       printer_exprs,
+                       exp_fun (pat_var "$") (exp_apply (exp_var name) (printers @ [exp_var "$"])))
         end
       | Tobject _ ->
           (printer_names,
            printer_exprs,
-           exp_fun pat_any (exp_string "<object>"))
+           Combinators.obj)
       | Tfield _ ->
-          (printer_names,
-           printer_exprs,
-           exp_fun pat_any (exp_string "<field>"))
+          assert false
       | Tnil ->
-          (printer_names,
-           printer_exprs,
-           exp_fun pat_any (exp_string "<nil>"))
+          assert false
       | Tlink typ ->
           gen env printer_names printer_exprs params typ
       | Tsubst typ ->
@@ -271,36 +295,29 @@ module MakeGen(Loc : sig val loc : Location.t end) = struct
                     | Rpresent None ->
                         (printer_names,
                          printer_exprs,
-                         (pat_variant name None,
-                          exp_string ("`" ^ name)) :: l)
+                         (name, None) :: l)
                     | Rpresent (Some typ) ->
                         let printer_names, printer_exprs, printer = gen env printer_names printer_exprs params typ in
                         (printer_names,
                          printer_exprs,
-                         (pat_variant name (Some (pat_var "$")),
-                          exp_concat ""
-                            [exp_string ("`" ^ name ^ " (");
-                             exp_apply printer [exp_var "$"];
-                             exp_string ")"]) :: l)
+                         (name, Some printer) :: l)
                     | _ ->
                         (printer_names, printer_exprs, l)
           in
           let printer_names, printer_exprs, l = aux printer_names printer_exprs l in
           (printer_names,
            printer_exprs,
-           exp_function l)
+           Combinators.poly_variant l)
       | Tunivar ->
           (printer_names,
            printer_exprs,
-           exp_fun pat_any (exp_string "<poly>"))
-      | Tpoly _ ->
-          (printer_names,
-           printer_exprs,
-           exp_fun pat_any (exp_string "<poly>"))
+           Combinators.var)
+      | Tpoly (typ, _) ->
+          gen env printer_names printer_exprs params typ
       | Tpackage _ ->
           (printer_names,
            printer_exprs,
-           exp_fun pat_any (exp_string "<module>"))
+           Combinators.package)
 
   and gen_printers env printer_names printer_exprs params typs =
     match typs with
@@ -312,148 +329,78 @@ module MakeGen(Loc : sig val loc : Location.t end) = struct
           (printer_names, printer_exprs, p :: l)
 
   and gen_constr_printer env printer_names printer_exprs path =
-    let li = replace_last (longident_of_path path) ("string_of_" ^ path_last path) in
+    let li = replace_last (longident_of_path path) (Combinators.prefix ^ path_last path) in
     if try let _ = Env.lookup_value li env in true with Not_found -> false then
       (printer_names,
        printer_exprs,
        { pexp_desc = Pexp_ident li;
-         pexp_loc = loc })
+         pexp_loc = Loc.loc })
     else if Path.same path path_int then
       (printer_names,
        printer_exprs,
-       exp_ident ["Pervasives"; "string_of_int"])
+       Combinators.int)
     else if Path.same path path_char then
       (printer_names,
        printer_exprs,
-       exp_fun
-         (pat_var "$")
-         (exp_concat ""
-            [exp_string "\"";
-             exp_apply (exp_ident ["Char"; "escaped"]) [exp_var "$"];
-             exp_string "\""]))
+       Combinators.char)
     else if Path.same path path_string then
       (printer_names,
        printer_exprs,
-       exp_fun
-         (pat_var "$")
-         (exp_concat ""
-            [exp_string "\"";
-             exp_apply (exp_ident ["String"; "escaped"]) [exp_var "$"];
-             exp_string "\""]))
+       Combinators.string)
     else if Path.same path path_float then
       (printer_names,
        printer_exprs,
-       exp_ident ["Pervasives"; "string_of_float"])
+       Combinators.float)
     else if Path.same path path_bool then
       (printer_names,
        printer_exprs,
-       exp_ident ["Pervasives"; "string_of_bool"])
+       Combinators.bool)
     else if Path.same path path_unit then
       (printer_names,
        printer_exprs,
-       exp_fun pat_any (exp_string "()"))
+       Combinators.unit)
     else if Path.same path path_exn then
       (printer_names,
        printer_exprs,
-       exp_ident ["Printexc"; "to_string"])
+       Combinators.exn)
     else if Path.same path path_nativeint then
       (printer_names,
        printer_exprs,
-       exp_fun
-         (pat_var "$")
-         (exp_concat ""
-            [exp_apply (exp_ident ["Nativeint"; "to_string"]) [exp_var "$"];
-             exp_string "n"]))
+       Combinators.nativeint)
     else if Path.same path path_int32 then
       (printer_names,
        printer_exprs,
-       exp_fun
-         (pat_var "$")
-         (exp_concat ""
-            [exp_apply (exp_ident ["Int32"; "to_string"]) [exp_var "$"];
-             exp_string "l"]))
+       Combinators.int32)
     else if Path.same path path_int64 then
       (printer_names,
        printer_exprs,
-       exp_fun
-         (pat_var "$")
-         (exp_concat ""
-            [exp_apply (exp_ident ["Int64"; "to_string"]) [exp_var "$"];
-             exp_string "L"]))
+       Combinators.int64)
     else if Path.same path path_lazy_t then
       (printer_names,
        printer_exprs,
-       exp_fun
-         (pat_var "$p0")
-         (exp_fun
-            (pat_lazy (pat_var "$"))
-            (exp_apply (exp_var "$p0") [exp_var "$"])))
+       Combinators.lazy_t)
     else if path = path_list then
       (printer_names,
        printer_exprs,
-       exp_fun
-         (pat_var "$p0")
-         (exp_function
-            [(pat_construct (Longident.Lident "[]") None,
-              exp_string "[]");
-             (pat_construct (Longident.Lident "::") (Some (pat_tuple [pat_var "$0"; pat_var "$1"])),
-              exp_concat ""
-                [exp_string "[";
-                 exp_apply (exp_var "$p0") [exp_var "$0"];
-                 exp_letrec
-                   [(pat_var "$aux",
-                     exp_function
-                       [(pat_construct (Longident.Lident "[]") None,
-                         exp_string "");
-                        (pat_construct (Longident.Lident "::") (Some (pat_tuple [pat_var "$0"; pat_var "$1"])),
-                         exp_concat ""
-                           [exp_string "; ";
-                            exp_apply (exp_var "$p0") [exp_var "$0"];
-                            exp_apply (exp_var "$aux") [exp_var "$1"]])])]
-                   (exp_apply (exp_var "$aux") [exp_var "$1"]);
-                 exp_string "]"])]))
+       Combinators.list)
     else if path = path_array then
       (printer_names,
        printer_exprs,
-       exp_fun
-         (pat_var "$p0")
-         (exp_function
-            [(pat_array [],
-              exp_string "[||]");
-             (pat_var "$",
-              exp_concat ""
-                [exp_string "[|";
-                 exp_apply (exp_var "$p0") [exp_apply (exp_ident ["Array"; "get"]) [exp_var "$"; exp_int 0]];
-                 exp_letrec
-                   [(pat_var "$aux",
-                     exp_fun
-                       (pat_var "$i")
-                       (exp_ifthenelse
-                          (exp_apply
-                             (exp_ident ["Pervasives"; "="])
-                             [exp_var "$i";
-                              exp_apply (exp_ident ["Array"; "length"]) [exp_var "$"]])
-                          (exp_string "")
-                          (exp_concat ""
-                             [exp_string "; ";
-                              exp_apply (exp_var "$p0") [exp_apply (exp_ident ["Array"; "get"]) [exp_var "$"; exp_var "$i"]];
-                              exp_apply (exp_var "$aux") [exp_apply (exp_ident ["Pervasives"; "succ"]) [exp_var "$i"]]])))]
-                   (exp_apply (exp_var "$aux") [exp_int 1]);
-                 exp_string "|]"])]))
+       Combinators.array)
     else
       let li = longident_of_path path in
       match try Some (Env.find_type path env) with Not_found -> None with
         | None ->
             (printer_names,
              printer_exprs,
-             exp_fun pat_any (exp_string "<abstract>"))
+             Combinators.abstract)
         | Some decl ->
             let mkfun e =
               let rec aux = function
                 | [] ->
                     e
                 | { id } :: params ->
-                    exp_fun (pat_var ("$p" ^ string_of_int id)) (aux params)
+                    exp_fun (pat_var ("$gen" ^ string_of_int id)) (aux params)
               in
               aux decl.type_params
             in
@@ -464,29 +411,17 @@ module MakeGen(Loc : sig val loc : Location.t end) = struct
                     match l with
                       | [] ->
                           (printer_names, printer_exprs, [])
-                      | (name, []) :: l ->
-                          let printer_names, printer_exprs, l = aux printer_names printer_exprs l in
-                          (printer_names,
-                           printer_exprs,
-                           (pat_construct (replace_last li name) None,
-                            exp_string name) :: l)
                       | (name, args) :: l ->
                           let printer_names, printer_exprs, l = aux printer_names printer_exprs l in
-                          let vars = gen_vars args in
                           let printer_names, printer_exprs, printers = gen_printers env printer_names printer_exprs params args in
                           (printer_names,
                            printer_exprs,
-                           (pat_construct (replace_last li name) (Some (pat_tuple (List.map pat_var vars))),
-                            exp_append
-                              (exp_string (name ^ " "))
-                              (exp_enclose
-                                 ", " "(" ")"
-                                 (List.map2 (fun var printer -> exp_apply printer [exp_var var]) vars printers))) :: l)
+                           (replace_last li name, name, printers) :: l)
                   in
                   let printer_names, printer_exprs, l = aux printer_names printer_exprs l in
                   (printer_names,
                    printer_exprs,
-                   mkfun (exp_function l))
+                   mkfun (Combinators.variant l))
               | { type_kind = Type_record (l, _) } ->
                   let rec aux printer_names printer_exprs l =
                     match l with
@@ -497,21 +432,16 @@ module MakeGen(Loc : sig val loc : Location.t end) = struct
                           let printer_names, printer_exprs, l = aux printer_names printer_exprs l in
                           (printer_names,
                            printer_exprs,
-                           exp_append
-                             (exp_string (name ^ " = "))
-                             (exp_apply printer [exp_field (exp_var "$") (replace_last li name)]) :: l)
+                           (replace_last li name, name, printer) :: l)
                   in
                   let printer_names, printer_exprs, l = aux printer_names printer_exprs l in
                   (printer_names,
                    printer_exprs,
-                   mkfun
-                     (exp_fun
-                        (pat_var "$")
-                        (exp_enclose "; " "{ " " }" l)))
+                   mkfun (Combinators.record l))
               | { type_kind = Type_abstract; type_manifest = None } ->
                   (printer_names,
                    printer_exprs,
-                   mkfun (exp_fun pat_any (exp_string "<abstract>")))
+                   mkfun Combinators.abstract)
               | { type_kind = Type_abstract; type_manifest = Some typ; type_private = Public } ->
                   let printer_names, printer_exprs, printer = gen env printer_names printer_exprs params typ in
                   (printer_names,
@@ -530,7 +460,37 @@ module MakeGen(Loc : sig val loc : Location.t end) = struct
                               (* We need to do a coercion here. *)
                               (exp_ident ["Obj"; "magic"])
                               [exp_var "$"]])))
+
+  let rec generate env typ =
+    let printer_names, printer_exprs, printer = gen env PathMap.empty [] IntSet.empty (Combinators.get_param typ) in
+    match printer_exprs with
+      | [] ->
+          printer
+      | _ ->
+          exp_letrec
+            (List.map
+               (fun (name, typ, expr) ->
+                  let expr =
+                    match expr.pexp_desc with
+                      | Pexp_function _ ->
+                          expr
+                      | _ ->
+                          exp_fun (pat_var "$") (exp_apply expr [exp_var "$"])
+                  in
+                  (pat_constraint (pat_var name) typ, expr))
+               printer_exprs)
+            printer
 end
+
+module GeneratorOfCombinators(Make : functor (Loc : Loc) -> Combinators) = struct
+  let generate env typ loc =
+    let module Loc = struct let loc = loc end in
+    let module Gen = MakeGenerator(Loc)(Make(Loc)) in
+    Gen.generate env typ
+end
+
+let generators = Hashtbl.create 8
+let register_generator name gen = Hashtbl.add generators name gen
 
 let rec expanse_structure l =
   List.map expanse_structure_item l
@@ -553,35 +513,10 @@ and expanse_structure_item = function
 
 and expanse_expression e =
   match e.exp_desc with
-    | Texp_ident (_, { val_kind = Val_prim { prim_name = "%show" } }) -> begin
-        match e.exp_type.desc with
-          | Tarrow (_, typ, _, _) ->
-              let module Gen = MakeGen(struct let loc = e.exp_loc end) in
-              let printer_names, printer_exprs, printer = Gen.gen e.exp_env PathMap.empty [] IntSet.empty typ in
-              let result =
-                match printer_exprs with
-                  | [] ->
-                      printer
-                  | _ ->
-                      Gen.exp_letrec
-                        (List.map
-                           (fun (name, typ, expr) ->
-                              let expr =
-                                match expr.pexp_desc with
-                                  | Pexp_function _ ->
-                                      expr
-                                  | _ ->
-                                      Gen.exp_fun (Gen.pat_var "$") (Gen.exp_apply expr [Gen.exp_var "$"])
-                              in
-                              (Gen.pat_constraint (Gen.pat_var name) typ, expr))
-                           printer_exprs)
-                        printer
-              in
-              (*Printast.implementation Format.std_formatter [{ pstr_desc = Pstr_eval result; pstr_loc = e.exp_loc }];*)
-              Typecore.type_expression e.exp_env result
-          | _ ->
-              failwith "invalid type for %show"
-      end
+    | Texp_ident (_, { val_kind = Val_prim { prim_name = name } }) when Hashtbl.mem generators name ->
+        let result = Hashtbl.find generators name e.exp_env e.exp_type e.exp_loc in
+        (*Printast.implementation Format.std_formatter [{ pstr_desc = Pstr_eval result; pstr_loc = e.exp_loc }];*)
+        Typecore.type_expression e.exp_env result
     | _ ->
         { e with exp_desc = expanse_expression_desc e.exp_desc }
 
